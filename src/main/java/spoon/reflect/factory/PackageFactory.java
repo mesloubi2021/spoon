@@ -1,23 +1,25 @@
 /*
  * SPDX-License-Identifier: (MIT OR CECILL-C)
  *
- * Copyright (C) 2006-2019 INRIA and contributors
+ * Copyright (C) 2006-2023 INRIA and contributors
  *
- * Spoon is available either under the terms of the MIT License (see LICENSE-MIT.txt) of the Cecill-C License (see LICENSE-CECILL-C.txt). You as the user are entitled to choose the terms under which to adopt Spoon.
+ * Spoon is available either under the terms of the MIT License (see LICENSE-MIT.txt) or the Cecill-C License (see LICENSE-CECILL-C.txt). You as the user are entitled to choose the terms under which to adopt Spoon.
  */
 package spoon.reflect.factory;
 
 
-import java.util.ArrayList;
-import java.util.Collection;
-import java.util.List;
-import java.util.StringTokenizer;
-import spoon.SpoonException;
 import spoon.reflect.declaration.CtModule;
 import spoon.reflect.declaration.CtPackage;
 import spoon.reflect.declaration.CtPackageDeclaration;
 import spoon.reflect.declaration.CtType;
 import spoon.reflect.reference.CtPackageReference;
+
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Set;
+import java.util.StringTokenizer;
 
 
 /**
@@ -155,9 +157,6 @@ public class PackageFactory extends SubFactory {
 	 * @return a found package or null
 	 */
 	public CtPackage get(String qualifiedName) {
-		if (qualifiedName.contains(CtType.INNERTTYPE_SEPARATOR)) {
-			throw new RuntimeException("Invalid package name " + qualifiedName);
-		}
 
 		// Find package with the most contained types. If a module exports package "foo.bar" and the
 		// other "foo.bar.baz", *both modules* will contain a "foo.bar" package in spoon. As
@@ -173,7 +172,7 @@ public class PackageFactory extends SubFactory {
 		//
 		// To solve this we look for the package with at least one contained type, effectively
 		// filtering out any synthetic packages.
-		int foundPackageCount = 0;
+		ArrayList<CtPackage> packages = new ArrayList<>();
 		CtPackage packageWithTypes = null;
 		CtPackage lastNonNullPackage = null;
 		for (CtModule module : factory.getModel().getAllModules()) {
@@ -184,22 +183,55 @@ public class PackageFactory extends SubFactory {
 			lastNonNullPackage = aPackage;
 			if (aPackage.hasTypes()) {
 				packageWithTypes = aPackage;
-				foundPackageCount++;
+				packages.add(aPackage);
 			}
 		}
 
-		if (foundPackageCount > 1) {
-			throw new SpoonException(
-					"Ambiguous package name detected. If you believe the code you analyzed is correct, please"
-							+ " file an issue and reference https://github.com/INRIA/spoon/issues/4051. "
-							+ "Error details: Found " + foundPackageCount + " non-empty packages with name "
-							+ "'" + qualifiedName + "'"
-			);
-		}
+		CtPackage probablePackage = packageWithTypes != null ? packageWithTypes : lastNonNullPackage;
 
 		// Return a non synthetic package but if *no* package had any types we return the last one.
 		// This ensures that you can also retrieve empty packages with this API
-		return packageWithTypes != null ? packageWithTypes : lastNonNullPackage;
+		return mergeAmbiguousPackages(packages, probablePackage);
+	}
+
+	/**
+	 * Merges ambiguous packagesToMerge together to fix inconsistent heirarchies.
+	 * @param packagesToMerge - The list of ambiguous packagesToMerge
+	 * @param mergingPackage - The package to merge everything into.
+	 * @return
+	 */
+	private CtPackage mergeAmbiguousPackages(ArrayList<CtPackage> packagesToMerge, CtPackage mergingPackage) {
+
+		if (mergingPackage == null) return null;
+
+		HashSet<CtType<?>> types = new HashSet<>(mergingPackage.getTypes());
+		HashSet<CtPackage> subpacks = new HashSet<>(mergingPackage.getPackages());
+
+		for (CtPackage pack : packagesToMerge) {
+			if (pack == mergingPackage) continue;
+
+
+            Set<CtType<?>> oldTypes = pack.getTypes();
+            Set<CtPackage> oldPacks = pack.getPackages();
+
+            for (CtType<?> type : oldTypes) {
+				// If we don't disconnect the type from its old package, spoon will get mad.
+				((CtPackage)type.getParent()).removeType(type);
+				type.setParent(null);
+			}
+			types.addAll(oldTypes);
+
+            for (CtPackage oldPack : oldPacks) {
+				// Applies to packagesToMerge too.
+				((CtPackage)oldPack.getParent()).removePackage(oldPack);
+                oldPack.setParent(null);
+            }
+            subpacks.addAll(oldPacks);
+			pack.delete();
+		}
+		mergingPackage.setTypes(types);
+		mergingPackage.setPackages(subpacks);
+		return mergingPackage;
 	}
 
 	/**
